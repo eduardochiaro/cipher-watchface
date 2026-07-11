@@ -1,0 +1,50 @@
+{
+  "name": "cipher-watchface",
+  "author": "Eduardo Chiaro",
+  "version": "1.0.0",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "scripts": {
+    "build": "pebble clean && pebble build",
+    "emulator": "npm run build && pebble install --emulator ",
+    "phone": "npm run build && pebble install --phone",
+    "config": "pebble emu-app-config --emulator",
+    "logs": "pebble logs"
+  },
+  "pebble": {
+    "displayName": "Bill Cipher is watching you",
+    "uuid": "fbb4d8b2-3036-4408-8f1b-3a1da81f29e0",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery",
+      "flint",
+      "gabbro"
+    ],
+    "watchapp": {
+      "watchface": true
+    },
+    "messageKeys": [
+      "TIME_COLOR",
+      "FLICK_ANIMATION"
+    ],
+    "resources": {
+      "media": [
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BACKGROUND",
+          "file": "background.png"
+        }
+      ]
+    }
+  },
+  "dependencies": {
+    "@rebble/clay": "^1.0.10"
+  }
+}

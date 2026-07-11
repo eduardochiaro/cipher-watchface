@@ -1,0 +1,32 @@
+[
+  {
+    "type": "heading",
+    "defaultValue": "Bill Cipher Settings"
+  },
+  {
+    "type": "section",
+    "items": [
+      {
+        "type": "select",
+        "messageKey": "TIME_COLOR",
+        "label": "Time Color",
+        "defaultValue": "anaglyph",
+        "options": [
+          { "label": "Anaglyph", "value": "anaglyph" },
+          { "label": "Light Grey", "value": "lightgrey" }
+        ]
+      },
+      {
+        "type": "toggle",
+        "messageKey": "FLICK_ANIMATION",
+        "label": "Animation on flick",
+        "description": "If off, the hover animation only plays when the watchface loads.",
+        "defaultValue": true
+      }
+    ]
+  },
+  {
+    "type": "submit",
+    "defaultValue": "Save"
+  }
+]
