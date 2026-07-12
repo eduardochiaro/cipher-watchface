@@ -50,6 +50,11 @@
           "type": "bitmap",
           "name": "IMAGE_NUMBERS",
           "file": "numbers.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_LETTERS",
+          "file": "letters.png"
         }
       ]
     }

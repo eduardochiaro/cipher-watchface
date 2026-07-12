@@ -12,6 +12,7 @@
   #define DIGIT_GAP 2
   #define MODULE_GAP 6
   #define EDGE_MARGIN 10
+  #define TEXT_Y_OFFSET 4
 #else
   #define BATT_W 15
   #define BATT_H 8
@@ -20,8 +21,14 @@
   #define DIGIT_GAP 1
   #define MODULE_GAP 3
   #define EDGE_MARGIN 5
+  #define TEXT_Y_OFFSET 1
 #endif
 #define STEPS_W (6 * (DIGIT_W + DIGIT_GAP) - DIGIT_GAP)
+// "WEDNESDAY" = 9 glyph cells; "MAY 31" = 6 (space advances like a glyph)
+#define DAY_W (9 * (DIGIT_W + DIGIT_GAP) - DIGIT_GAP)
+#define DATE_W (6 * (DIGIT_W + DIGIT_GAP) - DIGIT_GAP)
+// space advance = 60% of a glyph cell, rounded
+#define SPACE_ADV (((DIGIT_W + DIGIT_GAP) * 3 + 2) / 5)
 
 #define PERSIST_ANAGLYPH 1
 #define PERSIST_FLICK_ANIM 2
@@ -36,10 +43,16 @@ static Layer *s_time_canvas;
 static BitmapLayer *s_battery_layer;
 static GBitmap *s_battery_sheet;
 static GBitmap *s_battery_bitmap;
-#if defined(PBL_HEALTH)
-static Layer *s_steps_layer;
 static GBitmap *s_numbers_sheet;
 static GBitmap *s_digit_bitmaps[10];
+static GBitmap *s_letters_sheet;
+static GBitmap *s_letter_bitmaps[26];
+static Layer *s_day_layer;
+static Layer *s_date_layer;
+static char s_day_buffer[12];
+static char s_date_buffer[8];
+#if defined(PBL_HEALTH)
+static Layer *s_steps_layer;
 static int s_steps;
 #endif
 static GFont s_time_font;
@@ -53,6 +66,30 @@ static void prv_update_time(void) {
            clock_is_24h_style() ? "%H" : "%I", tick_time);
   strftime(s_minute_buffer, sizeof(s_minute_buffer), "%M", tick_time);
   layer_mark_dirty(s_time_canvas);
+
+  // "SUNDAY" / "JUL 12" — letter sheet is caps-only
+  char day[12], date[8], mon[4];
+  strftime(day, sizeof(day), "%A", tick_time);
+  strftime(mon, sizeof(mon), "%b", tick_time);
+  snprintf(date, sizeof(date), "%s %d", mon, tick_time->tm_mday);
+  for (char *p = day; *p; p++) {
+    if (*p >= 'a' && *p <= 'z') {
+      *p -= 'a' - 'A';
+    }
+  }
+  for (char *p = date; *p; p++) {
+    if (*p >= 'a' && *p <= 'z') {
+      *p -= 'a' - 'A';
+    }
+  }
+  if (s_day_layer && strcmp(day, s_day_buffer) != 0) {
+    strncpy(s_day_buffer, day, sizeof(s_day_buffer));
+    layer_mark_dirty(s_day_layer);
+  }
+  if (s_date_layer && strcmp(date, s_date_buffer) != 0) {
+    strncpy(s_date_buffer, date, sizeof(s_date_buffer));
+    layer_mark_dirty(s_date_layer);
+  }
 }
 
 static void prv_draw_time(GContext *ctx, GRect bounds, int16_t dx, int16_t dy,
@@ -107,16 +144,24 @@ static int prv_isqrt(int n) {
   return x;
 }
 
-// x of the screen circle's right edge across the band [y, y+h)
-static int prv_round_right_edge(GRect bounds, int y, int h) {
+// half-width of the screen circle's chord across the band [y, y+h)
+static int prv_round_chord_halfw(GRect bounds, int y, int h) {
   int cx = bounds.size.w / 2;
   int cy = bounds.size.h / 2;
   // widest inset of the band: its row farthest from vertical center
   int dy = (y + h <= cy) ? cy - y : (y + h) - cy;
   if (dy >= cx) {
-    return cx;
+    return 0;
   }
-  return cx + prv_isqrt(cx * cx - dy * dy);
+  return prv_isqrt(cx * cx - dy * dy);
+}
+
+static int prv_round_right_edge(GRect bounds, int y, int h) {
+  return bounds.size.w / 2 + prv_round_chord_halfw(bounds, y, h);
+}
+
+static int prv_round_left_edge(GRect bounds, int y, int h) {
+  return bounds.size.w / 2 - prv_round_chord_halfw(bounds, y, h);
 }
 #endif
 
@@ -133,21 +178,47 @@ static void prv_battery_handler(BatteryChargeState state) {
   bitmap_layer_set_bitmap(s_battery_layer, s_battery_bitmap);
 }
 
+// sprite glyphs: digits from numbers.png (1..9,0), caps from letters.png (A..Z)
+static GBitmap *prv_glyph_for(char c) {
+  if (c >= '0' && c <= '9') {
+    return s_digit_bitmaps[c - '0'];
+  }
+  if (c >= 'A' && c <= 'Z') {
+    return s_letter_bitmaps[c - 'A'];
+  }
+  return NULL;  // space: advance only
+}
+
+static void prv_draw_glyphs(GContext *ctx, const char *str, int x) {
+  graphics_context_set_compositing_mode(ctx, GCompOpSet);
+  for (; *str; str++) {
+    GBitmap *g = prv_glyph_for(*str);
+    if (g) {
+      graphics_draw_bitmap_in_rect(ctx, g, GRect(x, 0, DIGIT_W, DIGIT_H));
+      x += DIGIT_W + DIGIT_GAP;
+    } else {
+      x += SPACE_ADV;
+    }
+  }
+}
+
+static void prv_day_update_proc(Layer *layer, GContext *ctx) {
+  prv_draw_glyphs(ctx, s_day_buffer, 0);
+}
+
+static void prv_date_update_proc(Layer *layer, GContext *ctx) {
+  prv_draw_glyphs(ctx, s_date_buffer, 0);
+}
+
 #if defined(PBL_HEALTH)
-// numbers.png: 10 digits of 5x8, left to right 1,2,...,9,0
 static void prv_steps_update_proc(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
   char buf[8];
   snprintf(buf, sizeof(buf), "%d", s_steps);
   int len = strlen(buf);
-  // right-aligned, digit + gap advance
-  int x = bounds.size.w - (len * (DIGIT_W + DIGIT_GAP) - DIGIT_GAP);
-  graphics_context_set_compositing_mode(ctx, GCompOpSet);
-  for (int i = 0; i < len; i++) {
-    graphics_draw_bitmap_in_rect(ctx, s_digit_bitmaps[buf[i] - '0'],
-                                 GRect(x, 0, DIGIT_W, DIGIT_H));
-    x += DIGIT_W + DIGIT_GAP;
-  }
+  // right-aligned
+  prv_draw_glyphs(ctx, buf,
+                  bounds.size.w - (len * (DIGIT_W + DIGIT_GAP) - DIGIT_GAP));
 }
 
 static void prv_health_handler(HealthEventType event, void *context) {
@@ -258,13 +329,39 @@ static void prv_window_load(Window *window) {
   battery_state_service_subscribe(prv_battery_handler);
   prv_battery_handler(battery_state_service_peek());
 
-#if defined(PBL_HEALTH)
   s_numbers_sheet = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_NUMBERS);
   for (int d = 0; d < 10; d++) {
     int col = (d == 0) ? 9 : d - 1;
     s_digit_bitmaps[d] = gbitmap_create_as_sub_bitmap(s_numbers_sheet,
         GRect(col * DIGIT_W, 0, DIGIT_W, DIGIT_H));
   }
+  s_letters_sheet = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_LETTERS);
+  for (int l = 0; l < 26; l++) {
+    s_letter_bitmaps[l] = gbitmap_create_as_sub_bitmap(s_letters_sheet,
+        GRect(l * DIGIT_W, 0, DIGIT_W, DIGIT_H));
+  }
+
+  // top-left: weekday, then month + day stacked below, same gap as right side;
+  // nudged down so text balances the taller battery sprite
+  int day_y = batt_frame.origin.y + TEXT_Y_OFFSET;
+  int date_y = day_y + DIGIT_H + MODULE_GAP;
+#if defined(PBL_ROUND)
+  GRect day_frame = GRect(prv_round_left_edge(bounds, day_y, DIGIT_H) + EDGE_MARGIN,
+                          day_y, DAY_W, DIGIT_H);
+  GRect date_frame = GRect(prv_round_left_edge(bounds, date_y, DIGIT_H) + EDGE_MARGIN,
+                           date_y, DATE_W, DIGIT_H);
+#else
+  GRect day_frame = GRect(EDGE_MARGIN, day_y, DAY_W, DIGIT_H);
+  GRect date_frame = GRect(EDGE_MARGIN, date_y, DATE_W, DIGIT_H);
+#endif
+  s_day_layer = layer_create(day_frame);
+  layer_set_update_proc(s_day_layer, prv_day_update_proc);
+  layer_add_child(window_layer, s_day_layer);
+  s_date_layer = layer_create(date_frame);
+  layer_set_update_proc(s_date_layer, prv_date_update_proc);
+  layer_add_child(window_layer, s_date_layer);
+
+#if defined(PBL_HEALTH)
   // right-aligned under battery, wide enough for 6 digits
   int steps_y = batt_frame.origin.y + batt_frame.size.h + MODULE_GAP;
 #if defined(PBL_ROUND)
@@ -290,11 +387,17 @@ static void prv_window_unload(Window *window) {
 #if defined(PBL_HEALTH)
   health_service_events_unsubscribe();
   layer_destroy(s_steps_layer);
+#endif
+  layer_destroy(s_day_layer);
+  layer_destroy(s_date_layer);
   for (int d = 0; d < 10; d++) {
     gbitmap_destroy(s_digit_bitmaps[d]);
   }
   gbitmap_destroy(s_numbers_sheet);
-#endif
+  for (int l = 0; l < 26; l++) {
+    gbitmap_destroy(s_letter_bitmaps[l]);
+  }
+  gbitmap_destroy(s_letters_sheet);
   battery_state_service_unsubscribe();
   bitmap_layer_destroy(s_battery_layer);
   gbitmap_destroy(s_battery_bitmap);
