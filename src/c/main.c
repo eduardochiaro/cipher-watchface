@@ -3,6 +3,26 @@
 #define SHADOW_OFFSET 2
 #define TIME_HEIGHT 44
 
+// battery/numbers ~emery/~gabbro sheets are 2x
+#if PBL_PLATFORM_EMERY || PBL_PLATFORM_GABBRO
+  #define BATT_W 30
+  #define BATT_H 16
+  #define DIGIT_W 9
+  #define DIGIT_H 11
+  #define DIGIT_GAP 2
+  #define MODULE_GAP 6
+  #define EDGE_MARGIN 10
+#else
+  #define BATT_W 15
+  #define BATT_H 8
+  #define DIGIT_W 5
+  #define DIGIT_H 8
+  #define DIGIT_GAP 1
+  #define MODULE_GAP 3
+  #define EDGE_MARGIN 5
+#endif
+#define STEPS_W (6 * (DIGIT_W + DIGIT_GAP) - DIGIT_GAP)
+
 #define PERSIST_ANAGLYPH 1
 #define PERSIST_FLICK_ANIM 2
 
@@ -13,6 +33,15 @@ static Window *s_window;
 static BitmapLayer *s_background_layer;
 static GBitmap *s_background_bitmap;
 static Layer *s_time_canvas;
+static BitmapLayer *s_battery_layer;
+static GBitmap *s_battery_sheet;
+static GBitmap *s_battery_bitmap;
+#if defined(PBL_HEALTH)
+static Layer *s_steps_layer;
+static GBitmap *s_numbers_sheet;
+static GBitmap *s_digit_bitmaps[10];
+static int s_steps;
+#endif
 static GFont s_time_font;
 static char s_hour_buffer[4];
 static char s_minute_buffer[4];
@@ -69,6 +98,65 @@ static void prv_time_update_proc(Layer *layer, GContext *ctx) {
 static void prv_tick_handler(struct tm *tick_time, TimeUnits units_changed) {
   prv_update_time();
 }
+
+#if defined(PBL_ROUND)
+// ponytail: loop isqrt, runs once per module at load, n <= 8100
+static int prv_isqrt(int n) {
+  int x = 0;
+  while ((x + 1) * (x + 1) <= n) x++;
+  return x;
+}
+
+// x of the screen circle's right edge across the band [y, y+h)
+static int prv_round_right_edge(GRect bounds, int y, int h) {
+  int cx = bounds.size.w / 2;
+  int cy = bounds.size.h / 2;
+  // widest inset of the band: its row farthest from vertical center
+  int dy = (y + h <= cy) ? cy - y : (y + h) - cy;
+  if (dy >= cx) {
+    return cx;
+  }
+  return cx + prv_isqrt(cx * cx - dy * dy);
+}
+#endif
+
+// battery.png: 5x2 grid of 15x8 sprites, 100% top-left down to 10% bottom-right
+static void prv_battery_handler(BatteryChargeState state) {
+  int idx = (100 - state.charge_percent) / 10;
+  if (idx < 0) idx = 0;
+  if (idx > 9) idx = 9;  // 0% reuses the 10% sprite
+  if (s_battery_bitmap) {
+    gbitmap_destroy(s_battery_bitmap);
+  }
+  s_battery_bitmap = gbitmap_create_as_sub_bitmap(s_battery_sheet,
+      GRect((idx % 5) * BATT_W, (idx / 5) * BATT_H, BATT_W, BATT_H));
+  bitmap_layer_set_bitmap(s_battery_layer, s_battery_bitmap);
+}
+
+#if defined(PBL_HEALTH)
+// numbers.png: 10 digits of 5x8, left to right 1,2,...,9,0
+static void prv_steps_update_proc(Layer *layer, GContext *ctx) {
+  GRect bounds = layer_get_bounds(layer);
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%d", s_steps);
+  int len = strlen(buf);
+  // right-aligned, digit + gap advance
+  int x = bounds.size.w - (len * (DIGIT_W + DIGIT_GAP) - DIGIT_GAP);
+  graphics_context_set_compositing_mode(ctx, GCompOpSet);
+  for (int i = 0; i < len; i++) {
+    graphics_draw_bitmap_in_rect(ctx, s_digit_bitmaps[buf[i] - '0'],
+                                 GRect(x, 0, DIGIT_W, DIGIT_H));
+    x += DIGIT_W + DIGIT_GAP;
+  }
+}
+
+static void prv_health_handler(HealthEventType event, void *context) {
+  if (event == HealthEventSignificantUpdate || event == HealthEventMovementUpdate) {
+    s_steps = (int)health_service_sum_today(HealthMetricStepCount);
+    layer_mark_dirty(s_steps_layer);
+  }
+}
+#endif
 
 static bool s_hovering;
 
@@ -153,11 +241,64 @@ static void prv_window_load(Window *window) {
   layer_set_update_proc(s_time_canvas, prv_time_update_proc);
   layer_add_child(window_layer, s_time_canvas);
 
+  s_battery_sheet = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_BATTERY);
+#if defined(PBL_ROUND)
+  // hug the circular edge: right edge of each module follows the chord at its y
+  int batt_y = 20;
+  GRect batt_frame = GRect(
+      prv_round_right_edge(bounds, batt_y, BATT_H) - EDGE_MARGIN - BATT_W,
+      batt_y, BATT_W, BATT_H);
+#else
+  GRect batt_frame = GRect(bounds.size.w - BATT_W - EDGE_MARGIN,
+                           EDGE_MARGIN, BATT_W, BATT_H);
+#endif
+  s_battery_layer = bitmap_layer_create(batt_frame);
+  bitmap_layer_set_compositing_mode(s_battery_layer, GCompOpSet);
+  layer_add_child(window_layer, bitmap_layer_get_layer(s_battery_layer));
+  battery_state_service_subscribe(prv_battery_handler);
+  prv_battery_handler(battery_state_service_peek());
+
+#if defined(PBL_HEALTH)
+  s_numbers_sheet = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_NUMBERS);
+  for (int d = 0; d < 10; d++) {
+    int col = (d == 0) ? 9 : d - 1;
+    s_digit_bitmaps[d] = gbitmap_create_as_sub_bitmap(s_numbers_sheet,
+        GRect(col * DIGIT_W, 0, DIGIT_W, DIGIT_H));
+  }
+  // right-aligned under battery, wide enough for 6 digits
+  int steps_y = batt_frame.origin.y + batt_frame.size.h + MODULE_GAP;
+#if defined(PBL_ROUND)
+  GRect steps_frame = GRect(
+      prv_round_right_edge(bounds, steps_y, DIGIT_H) - EDGE_MARGIN - STEPS_W,
+      steps_y, STEPS_W, DIGIT_H);
+#else
+  GRect steps_frame = GRect(batt_frame.origin.x + batt_frame.size.w - STEPS_W,
+                            steps_y, STEPS_W, DIGIT_H);
+#endif
+  s_steps_layer = layer_create(steps_frame);
+  layer_set_update_proc(s_steps_layer, prv_steps_update_proc);
+  layer_add_child(window_layer, s_steps_layer);
+  health_service_events_subscribe(prv_health_handler, NULL);
+  s_steps = (int)health_service_sum_today(HealthMetricStepCount);
+#endif
+
   prv_update_time();
   prv_hover_animation();
 }
 
 static void prv_window_unload(Window *window) {
+#if defined(PBL_HEALTH)
+  health_service_events_unsubscribe();
+  layer_destroy(s_steps_layer);
+  for (int d = 0; d < 10; d++) {
+    gbitmap_destroy(s_digit_bitmaps[d]);
+  }
+  gbitmap_destroy(s_numbers_sheet);
+#endif
+  battery_state_service_unsubscribe();
+  bitmap_layer_destroy(s_battery_layer);
+  gbitmap_destroy(s_battery_bitmap);
+  gbitmap_destroy(s_battery_sheet);
   layer_destroy(s_time_canvas);
   bitmap_layer_destroy(s_background_layer);
   gbitmap_destroy(s_background_bitmap);

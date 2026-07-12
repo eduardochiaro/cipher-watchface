@@ -40,6 +40,16 @@
           "type": "bitmap",
           "name": "IMAGE_BACKGROUND",
           "file": "background.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BATTERY",
+          "file": "battery.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_NUMBERS",
+          "file": "numbers.png"
         }
       ]
     }
