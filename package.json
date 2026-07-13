@@ -35,7 +35,9 @@
       "FLICK_ANIMATION",
       "WEATHER_TEMPERATURE",
       "WEATHER_CODE",
-      "UNITS"
+      "UNITS",
+      "LEFT_MODULE[5]",
+      "RIGHT_MODULE[5]"
     ],
     "resources": {
       "media": [
