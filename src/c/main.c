@@ -1,6 +1,5 @@
 #include <pebble.h>
 
-#define SHADOW_OFFSET 2
 #define TIME_HEIGHT 44
 
 // battery/numbers ~emery/~gabbro sheets are 2x
@@ -14,6 +13,7 @@
   #define EDGE_MARGIN 10
   #define TEXT_Y_OFFSET 0
   #define ICON_SZ 11
+  #define SHADOW_OFFSET 4
 #else
   #define BATT_W 15
   #define BATT_H 8
@@ -24,6 +24,7 @@
   #define EDGE_MARGIN 5
   #define TEXT_Y_OFFSET 0
   #define ICON_SZ 8
+  #define SHADOW_OFFSET 2 
 #endif
 // right-column rows: up to 6 glyphs plus a trailing icon
 #define ROW_W (6 * (DIGIT_W + DIGIT_GAP) + ICON_SZ)
@@ -62,9 +63,13 @@ static GBitmap *s_icon_bitmaps[ICON_COUNT];
 static Layer *s_day_layer;
 static Layer *s_date_layer;
 static Layer *s_bt_layer;
+static Layer *s_weather_layer;
 static char s_day_buffer[12];
 static char s_date_buffer[8];
 static bool s_bt_connected;
+static bool s_weather_valid;
+static int s_weather_temp;
+static int s_weather_code;
 #if defined(PBL_HEALTH)
 static Layer *s_steps_layer;
 static Layer *s_dist_layer;
@@ -74,15 +79,13 @@ static int s_distance_m;
 static int s_kcal;
 #endif
 static GFont s_time_font;
-static char s_hour_buffer[4];
-static char s_minute_buffer[4];
+static char s_time_buffer[8];
 
 static void prv_update_time(void) {
   time_t temp = time(NULL);
   struct tm *tick_time = localtime(&temp);
-  strftime(s_hour_buffer, sizeof(s_hour_buffer),
-           clock_is_24h_style() ? "%H" : "%I", tick_time);
-  strftime(s_minute_buffer, sizeof(s_minute_buffer), "%M", tick_time);
+  strftime(s_time_buffer, sizeof(s_time_buffer),
+           clock_is_24h_style() ? "%H:%M" : "%I:%M", tick_time);
   layer_mark_dirty(s_time_canvas);
 
   // "SUNDAY" / "JUL 12" — letter sheet is caps-only
@@ -111,47 +114,84 @@ static void prv_update_time(void) {
 }
 
 static void prv_draw_time(GContext *ctx, GRect bounds, int16_t dx, int16_t dy,
-                          GColor hour_color, GColor colon_color, GColor minute_color) {
-  const char *pieces[3] = { s_hour_buffer, ":", s_minute_buffer };
-  GColor colors[3] = { hour_color, colon_color, minute_color };
-  GRect measure = GRect(0, 0, bounds.size.w, bounds.size.h);
-
-  int widths[3];
-  int total = 0;
-  for (int i = 0; i < 3; i++) {
-    widths[i] = graphics_text_layout_get_content_size(pieces[i], s_time_font,
-        measure, GTextOverflowModeWordWrap, GTextAlignmentLeft).w;
-    total += widths[i];
-  }
-
-  int x = (bounds.size.w - total) / 2 + dx;
-  for (int i = 0; i < 3; i++) {
-    graphics_context_set_text_color(ctx, colors[i]);
-    graphics_draw_text(ctx, pieces[i], s_time_font,
-        GRect(x, dy, widths[i], bounds.size.h - dy),
-        GTextOverflowModeWordWrap, GTextAlignmentLeft, NULL);
-    x += widths[i];
-  }
+                          GColor color) {
+  graphics_context_set_text_color(ctx, color);
+  graphics_draw_text(ctx, s_time_buffer, s_time_font,
+      GRect(dx, dy, bounds.size.w, bounds.size.h),
+      GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
 }
+
+#if defined(PBL_COLOR)
+// no gradient text API: main pass drawn in a sentinel color nothing else on
+// screen uses, then its framebuffer rows remapped to 3 horizontal bands
+static void prv_gradient_remap(GContext *ctx, Layer *layer) {
+  static const uint8_t bands[3] = {
+    GColorYellowARGB8, GColorOrangeARGB8, GColorDarkCandyAppleRedARGB8
+  };
+  GBitmap *fb = graphics_capture_frame_buffer(ctx);
+  if (!fb) {
+    return;
+  }
+  GRect frame = layer_get_frame(layer);
+  int w = frame.size.w;
+  int h = frame.size.h;
+  int amp = h / 4;  // arc depth of the yellow band's bottom edge
+  for (int y = 0; y < h; y++) {
+    GBitmapDataRowInfo row = gbitmap_get_data_row_info(fb, frame.origin.y + y);
+    for (int x = row.min_x; x <= row.max_x; x++) {
+      if (row.data[x] != GColorImperialPurpleARGB8) {
+        continue;
+      }
+      // yellow/chrome boundary bows down mid-screen (parabola, 0 at edges)
+      int bulge = amp * 4 * x * (w - 1 - x) / ((w - 1) * (w - 1));
+      uint8_t c;
+      if (y < h / 3 + bulge) {
+        c = bands[0];
+      } else if (y < 2 * h / 3) {
+        c = bands[1];
+      } else {
+        c = bands[2];
+      }
+      row.data[x] = c;
+    }
+  }
+  graphics_release_frame_buffer(ctx, fb);
+}
+#endif
 
 static void prv_time_update_proc(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
-  // shadow pass behind, then colored pass
-  prv_draw_time(ctx, bounds, SHADOW_OFFSET, SHADOW_OFFSET,
-                GColorBlack, GColorBlack, GColorBlack);
-  GColor grey = PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite);
+  // two shadow passes, offset opposite ways, then main pass on top
+  GColor up = PBL_IF_COLOR_ELSE(s_anaglyph ? GColorVividCerulean : GColorBlack,
+                                GColorBlack);
+  GColor down = PBL_IF_COLOR_ELSE(s_anaglyph ? GColorFolly : GColorBlack,
+                                  GColorBlack);
+  int offset = s_anaglyph? SHADOW_OFFSET : SHADOW_OFFSET-1;
+  prv_draw_time(ctx, bounds, -offset, -offset, up);
+  prv_draw_time(ctx, bounds, offset, offset, down);
+  prv_draw_time(ctx, bounds, -1, -1, GColorBlack);
+  prv_draw_time(ctx, bounds, -1, 1, GColorBlack);
+  prv_draw_time(ctx, bounds, 1, -1, GColorBlack);
+  prv_draw_time(ctx, bounds, 1, 1, GColorBlack);
+#if defined(PBL_COLOR)
   if (s_anaglyph) {
-    prv_draw_time(ctx, bounds, 0, 0,
-                  PBL_IF_COLOR_ELSE(GColorVividCerulean, GColorWhite),
-                  grey,
-                  PBL_IF_COLOR_ELSE(GColorFolly, GColorWhite));
-  } else {
-    prv_draw_time(ctx, bounds, 0, 0, grey, grey, grey);
+    prv_draw_time(ctx, bounds, 0, 0, GColorImperialPurple);
+    prv_gradient_remap(ctx, layer);
+    return;
   }
+#endif
+  prv_draw_time(ctx, bounds, 0, 0, GColorWhite);
 }
 
 static void prv_tick_handler(struct tm *tick_time, TimeUnits units_changed) {
   prv_update_time();
+  // empty ping: pkjs treats any inbound appmessage as a weather-refresh request
+  if (tick_time->tm_min % 30 == 0) {
+    DictionaryIterator *iter;
+    if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
+      app_message_outbox_send();
+    }
+  }
 }
 
 #if defined(PBL_ROUND)
@@ -260,6 +300,43 @@ static void prv_bt_update_proc(Layer *layer, GContext *ctx) {
   prv_draw_glyphs(ctx, s_bt_connected ? "ON" : "OFF", ICON_SZ + DIGIT_GAP);
 }
 
+// WMO weather codes (Open-Meteo) to icon cell
+static int prv_weather_icon(int code) {
+  if (code >= 95) return ICON_STORM;
+  if ((code >= 71 && code <= 77) || code == 85 || code == 86) return ICON_SNOW;
+  if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) return ICON_RAIN;
+  if (code <= 1) return ICON_SUN;
+  return ICON_CLOUD;  // partly cloudy, overcast, fog
+}
+
+static void prv_weather_update_proc(Layer *layer, GContext *ctx) {
+  if (!s_weather_valid) {
+    return;
+  }
+  graphics_context_set_compositing_mode(ctx, GCompOpSet);
+  graphics_draw_bitmap_in_rect(ctx,
+      s_icon_bitmaps[prv_weather_icon(s_weather_code)],
+      GRect(0, 0, ICON_SZ, ICON_SZ));
+  int t = s_weather_temp;
+  int x = ICON_SZ + DIGIT_GAP;
+  if (t < 0) {
+    t = -t;
+    // glyph sheets have no '-': draw a dash to match the white sprites
+    graphics_context_set_fill_color(ctx, GColorWhite);
+    graphics_fill_rect(ctx, GRect(x, DIGIT_H / 2 - 1, DIGIT_W - 1, 2),
+                       0, GCornerNone);
+    x += DIGIT_W + DIGIT_GAP;
+  }
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%d", t);
+  prv_draw_glyphs(ctx, buf, x);
+  // degree symbol: small dot at the top-right of the number
+  x += prv_glyphs_width(buf) + DIGIT_GAP;
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, GRect(x, 0, DIGIT_GAP + 1, DIGIT_GAP + 1),
+                     0, GCornerNone);
+}
+
 static void prv_bt_handler(bool connected) {
   s_bt_connected = connected;
   if (s_bt_layer) {
@@ -275,16 +352,25 @@ static void prv_steps_update_proc(Layer *layer, GContext *ctx) {
 }
 
 static void prv_dist_update_proc(Layer *layer, GContext *ctx) {
-  char buf[16];
+  char num[8];
+  const char *unit;
   if (health_service_get_measurement_system_for_display(
           HealthMetricWalkedDistanceMeters) == MeasurementSystemImperial) {
-    snprintf(buf, sizeof(buf), "%d MI", s_distance_m * 1000 / 1609344);
+    snprintf(num, sizeof(num), "%d", s_distance_m * 1000 / 1609344);
+    unit = "MI";
   } else if (s_distance_m >= 1000) {
-    snprintf(buf, sizeof(buf), "%d KM", s_distance_m / 1000);
+    snprintf(num, sizeof(num), "%d", s_distance_m / 1000);
+    unit = "KM";
   } else {
-    snprintf(buf, sizeof(buf), "%d M", s_distance_m);
+    snprintf(num, sizeof(num), "%d", s_distance_m);
+    unit = "M";
   }
-  prv_draw_row_right(layer, ctx, buf, -1);
+  // number and unit drawn separately: tighter gap than a full SPACE_ADV
+  GRect bounds = layer_get_bounds(layer);
+  int unit_x = bounds.size.w - prv_glyphs_width(unit);
+  prv_draw_glyphs(ctx, unit, unit_x);
+  prv_draw_glyphs(ctx, num,
+      unit_x - (DIGIT_GAP + 1) - prv_glyphs_width(num));
 }
 
 static void prv_cal_update_proc(Layer *layer, GContext *ctx) {
@@ -359,6 +445,16 @@ static void prv_inbox_received(DictionaryIterator *iter, void *context) {
   if (t) {
     s_flick_anim = t->value->int32 == 1;
     persist_write_bool(PERSIST_FLICK_ANIM, s_flick_anim);
+  }
+  Tuple *temp_t = dict_find(iter, MESSAGE_KEY_WEATHER_TEMPERATURE);
+  Tuple *code_t = dict_find(iter, MESSAGE_KEY_WEATHER_CODE);
+  if (temp_t && code_t) {
+    s_weather_temp = (int)temp_t->value->int32;
+    s_weather_code = (int)code_t->value->int32;
+    s_weather_valid = true;
+    if (s_weather_layer) {
+      layer_mark_dirty(s_weather_layer);
+    }
   }
 }
 
@@ -459,6 +555,20 @@ static void prv_window_load(Window *window) {
   });
   s_bt_connected = connection_service_peek_pebble_app_connection();
 
+  // weather icon + temperature below the bluetooth row; hidden until data arrives
+  int wx_y = bt_y + ICON_SZ + MODULE_GAP;
+  // icon + up to minus and 3 digits + degree dot
+  int wx_w = ICON_SZ + DIGIT_GAP + 4 * (DIGIT_W + DIGIT_GAP) + DIGIT_GAP + 1;
+#if defined(PBL_ROUND)
+  GRect wx_frame = GRect(prv_round_left_edge(bounds, wx_y, ICON_SZ) + EDGE_MARGIN,
+                         wx_y, wx_w, ICON_SZ);
+#else
+  GRect wx_frame = GRect(EDGE_MARGIN, wx_y, wx_w, ICON_SZ);
+#endif
+  s_weather_layer = layer_create(wx_frame);
+  layer_set_update_proc(s_weather_layer, prv_weather_update_proc);
+  layer_add_child(window_layer, s_weather_layer);
+
 #if defined(PBL_HEALTH)
   // right column under battery: steps, distance, calories
   Layer **row_layers[3] = { &s_steps_layer, &s_dist_layer, &s_cal_layer };
@@ -498,6 +608,7 @@ static void prv_window_unload(Window *window) {
   layer_destroy(s_cal_layer);
 #endif
   connection_service_unsubscribe();
+  layer_destroy(s_weather_layer);
   layer_destroy(s_bt_layer);
   for (int i = 0; i < ICON_COUNT; i++) {
     gbitmap_destroy(s_icon_bitmaps[i]);

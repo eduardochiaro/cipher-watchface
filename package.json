@@ -32,7 +32,10 @@
     },
     "messageKeys": [
       "TIME_COLOR",
-      "FLICK_ANIMATION"
+      "FLICK_ANIMATION",
+      "WEATHER_TEMPERATURE",
+      "WEATHER_CODE",
+      "UNITS"
     ],
     "resources": {
       "media": [

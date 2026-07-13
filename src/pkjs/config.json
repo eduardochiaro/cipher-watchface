@@ -13,7 +13,18 @@
         "defaultValue": "anaglyph",
         "options": [
           { "label": "Anaglyph", "value": "anaglyph" },
-          { "label": "Light Grey", "value": "lightgrey" }
+          { "label": "White", "value": "white" }
+        ],
+        "capabilities": ["COLOR"]
+      },
+      {
+        "type": "select",
+        "messageKey": "UNITS",
+        "label": "Temperature Units",
+        "defaultValue": "0",
+        "options": [
+          { "label": "Celsius", "value": "0" },
+          { "label": "Fahrenheit", "value": "1" }
         ]
       },
       {
