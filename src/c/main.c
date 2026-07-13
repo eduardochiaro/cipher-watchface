@@ -5,14 +5,15 @@
 
 // battery/numbers ~emery/~gabbro sheets are 2x
 #if PBL_PLATFORM_EMERY || PBL_PLATFORM_GABBRO
-  #define BATT_W 30
-  #define BATT_H 16
+  #define BATT_W 23
+  #define BATT_H 11
   #define DIGIT_W 9
   #define DIGIT_H 11
   #define DIGIT_GAP 2
   #define MODULE_GAP 6
   #define EDGE_MARGIN 10
-  #define TEXT_Y_OFFSET 4
+  #define TEXT_Y_OFFSET 0
+  #define ICON_SZ 11
 #else
   #define BATT_W 15
   #define BATT_H 8
@@ -21,9 +22,18 @@
   #define DIGIT_GAP 1
   #define MODULE_GAP 3
   #define EDGE_MARGIN 5
-  #define TEXT_Y_OFFSET 1
+  #define TEXT_Y_OFFSET 0
+  #define ICON_SZ 8
 #endif
-#define STEPS_W (6 * (DIGIT_W + DIGIT_GAP) - DIGIT_GAP)
+// right-column rows: up to 6 glyphs plus a trailing icon
+#define ROW_W (6 * (DIGIT_W + DIGIT_GAP) + ICON_SZ)
+
+// icons.png: 10 square cells, left to right
+enum {
+  ICON_BT_ON, ICON_BT_OFF, ICON_FLAME, ICON_SHOE, ICON_HEART,
+  ICON_SUN, ICON_CLOUD, ICON_RAIN, ICON_SNOW, ICON_STORM,
+  ICON_COUNT
+};
 // "WEDNESDAY" = 9 glyph cells; "MAY 31" = 6 (space advances like a glyph)
 #define DAY_W (9 * (DIGIT_W + DIGIT_GAP) - DIGIT_GAP)
 #define DATE_W (6 * (DIGIT_W + DIGIT_GAP) - DIGIT_GAP)
@@ -47,13 +57,21 @@ static GBitmap *s_numbers_sheet;
 static GBitmap *s_digit_bitmaps[10];
 static GBitmap *s_letters_sheet;
 static GBitmap *s_letter_bitmaps[26];
+static GBitmap *s_icons_sheet;
+static GBitmap *s_icon_bitmaps[ICON_COUNT];
 static Layer *s_day_layer;
 static Layer *s_date_layer;
+static Layer *s_bt_layer;
 static char s_day_buffer[12];
 static char s_date_buffer[8];
+static bool s_bt_connected;
 #if defined(PBL_HEALTH)
 static Layer *s_steps_layer;
+static Layer *s_dist_layer;
+static Layer *s_cal_layer;
 static int s_steps;
+static int s_distance_m;
+static int s_kcal;
 #endif
 static GFont s_time_font;
 static char s_hour_buffer[4];
@@ -173,8 +191,10 @@ static void prv_battery_handler(BatteryChargeState state) {
   if (s_battery_bitmap) {
     gbitmap_destroy(s_battery_bitmap);
   }
+  // stride from sheet, not BATT_W: sprite may be narrower than its grid cell
+  int stride = gbitmap_get_bounds(s_battery_sheet).size.w / 5;
   s_battery_bitmap = gbitmap_create_as_sub_bitmap(s_battery_sheet,
-      GRect((idx % 5) * BATT_W, (idx / 5) * BATT_H, BATT_W, BATT_H));
+      GRect((idx % 5) * stride, (idx / 5) * BATT_H, BATT_W, BATT_H));
   bitmap_layer_set_bitmap(s_battery_layer, s_battery_bitmap);
 }
 
@@ -202,6 +222,28 @@ static void prv_draw_glyphs(GContext *ctx, const char *str, int x) {
   }
 }
 
+static int prv_glyphs_width(const char *str) {
+  int w = 0;
+  for (; *str; str++) {
+    w += prv_glyph_for(*str) ? DIGIT_W + DIGIT_GAP : SPACE_ADV;
+  }
+  return w - DIGIT_GAP;  // drop trailing gap
+}
+
+// text right-aligned against the layer's right edge, optional trailing icon
+static void prv_draw_row_right(Layer *layer, GContext *ctx,
+                               const char *str, int icon) {
+  GRect bounds = layer_get_bounds(layer);
+  int x = bounds.size.w - prv_glyphs_width(str);
+  if (icon >= 0) {
+    x -= ICON_SZ + DIGIT_GAP;
+    graphics_context_set_compositing_mode(ctx, GCompOpSet);
+    graphics_draw_bitmap_in_rect(ctx, s_icon_bitmaps[icon],
+        GRect(bounds.size.w - ICON_SZ, 0, ICON_SZ, ICON_SZ));
+  }
+  prv_draw_glyphs(ctx, str, x);
+}
+
 static void prv_day_update_proc(Layer *layer, GContext *ctx) {
   prv_draw_glyphs(ctx, s_day_buffer, 0);
 }
@@ -210,21 +252,55 @@ static void prv_date_update_proc(Layer *layer, GContext *ctx) {
   prv_draw_glyphs(ctx, s_date_buffer, 0);
 }
 
+static void prv_bt_update_proc(Layer *layer, GContext *ctx) {
+  graphics_context_set_compositing_mode(ctx, GCompOpSet);
+  graphics_draw_bitmap_in_rect(ctx,
+      s_icon_bitmaps[s_bt_connected ? ICON_BT_ON : ICON_BT_OFF],
+      GRect(0, 0, ICON_SZ, ICON_SZ));
+  prv_draw_glyphs(ctx, s_bt_connected ? "ON" : "OFF", ICON_SZ + DIGIT_GAP);
+}
+
+static void prv_bt_handler(bool connected) {
+  s_bt_connected = connected;
+  if (s_bt_layer) {
+    layer_mark_dirty(s_bt_layer);
+  }
+}
+
 #if defined(PBL_HEALTH)
 static void prv_steps_update_proc(Layer *layer, GContext *ctx) {
-  GRect bounds = layer_get_bounds(layer);
   char buf[8];
   snprintf(buf, sizeof(buf), "%d", s_steps);
-  int len = strlen(buf);
-  // right-aligned
-  prv_draw_glyphs(ctx, buf,
-                  bounds.size.w - (len * (DIGIT_W + DIGIT_GAP) - DIGIT_GAP));
+  prv_draw_row_right(layer, ctx, buf, ICON_SHOE);
+}
+
+static void prv_dist_update_proc(Layer *layer, GContext *ctx) {
+  char buf[16];
+  if (health_service_get_measurement_system_for_display(
+          HealthMetricWalkedDistanceMeters) == MeasurementSystemImperial) {
+    snprintf(buf, sizeof(buf), "%d MI", s_distance_m * 1000 / 1609344);
+  } else if (s_distance_m >= 1000) {
+    snprintf(buf, sizeof(buf), "%d KM", s_distance_m / 1000);
+  } else {
+    snprintf(buf, sizeof(buf), "%d M", s_distance_m);
+  }
+  prv_draw_row_right(layer, ctx, buf, -1);
+}
+
+static void prv_cal_update_proc(Layer *layer, GContext *ctx) {
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%d", s_kcal);
+  prv_draw_row_right(layer, ctx, buf, ICON_FLAME);
 }
 
 static void prv_health_handler(HealthEventType event, void *context) {
   if (event == HealthEventSignificantUpdate || event == HealthEventMovementUpdate) {
     s_steps = (int)health_service_sum_today(HealthMetricStepCount);
+    s_distance_m = (int)health_service_sum_today(HealthMetricWalkedDistanceMeters);
+    s_kcal = (int)health_service_sum_today(HealthMetricActiveKCalories);
     layer_mark_dirty(s_steps_layer);
+    layer_mark_dirty(s_dist_layer);
+    layer_mark_dirty(s_cal_layer);
   }
 }
 #endif
@@ -340,6 +416,11 @@ static void prv_window_load(Window *window) {
     s_letter_bitmaps[l] = gbitmap_create_as_sub_bitmap(s_letters_sheet,
         GRect(l * DIGIT_W, 0, DIGIT_W, DIGIT_H));
   }
+  s_icons_sheet = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_ICONS);
+  for (int i = 0; i < ICON_COUNT; i++) {
+    s_icon_bitmaps[i] = gbitmap_create_as_sub_bitmap(s_icons_sheet,
+        GRect(i * ICON_SZ, 0, ICON_SZ, ICON_SZ));
+  }
 
   // top-left: weekday, then month + day stacked below, same gap as right side;
   // nudged down so text balances the taller battery sprite
@@ -361,22 +442,48 @@ static void prv_window_load(Window *window) {
   layer_set_update_proc(s_date_layer, prv_date_update_proc);
   layer_add_child(window_layer, s_date_layer);
 
-#if defined(PBL_HEALTH)
-  // right-aligned under battery, wide enough for 6 digits
-  int steps_y = batt_frame.origin.y + batt_frame.size.h + MODULE_GAP;
+  // bluetooth icon + ON/OFF below the date
+  int bt_y = date_y + DIGIT_H + MODULE_GAP;
+  int bt_w = ICON_SZ + DIGIT_GAP + 3 * (DIGIT_W + DIGIT_GAP) - DIGIT_GAP;
 #if defined(PBL_ROUND)
-  GRect steps_frame = GRect(
-      prv_round_right_edge(bounds, steps_y, DIGIT_H) - EDGE_MARGIN - STEPS_W,
-      steps_y, STEPS_W, DIGIT_H);
+  GRect bt_frame = GRect(prv_round_left_edge(bounds, bt_y, ICON_SZ) + EDGE_MARGIN,
+                         bt_y, bt_w, ICON_SZ);
 #else
-  GRect steps_frame = GRect(batt_frame.origin.x + batt_frame.size.w - STEPS_W,
-                            steps_y, STEPS_W, DIGIT_H);
+  GRect bt_frame = GRect(EDGE_MARGIN, bt_y, bt_w, ICON_SZ);
 #endif
-  s_steps_layer = layer_create(steps_frame);
-  layer_set_update_proc(s_steps_layer, prv_steps_update_proc);
-  layer_add_child(window_layer, s_steps_layer);
+  s_bt_layer = layer_create(bt_frame);
+  layer_set_update_proc(s_bt_layer, prv_bt_update_proc);
+  layer_add_child(window_layer, s_bt_layer);
+  connection_service_subscribe((ConnectionHandlers) {
+    .pebble_app_connection_handler = prv_bt_handler,
+  });
+  s_bt_connected = connection_service_peek_pebble_app_connection();
+
+#if defined(PBL_HEALTH)
+  // right column under battery: steps, distance, calories
+  Layer **row_layers[3] = { &s_steps_layer, &s_dist_layer, &s_cal_layer };
+  LayerUpdateProc row_procs[3] = {
+    prv_steps_update_proc, prv_dist_update_proc, prv_cal_update_proc
+  };
+  int row_y = batt_frame.origin.y + batt_frame.size.h + MODULE_GAP;
+  for (int i = 0; i < 3; i++) {
+#if defined(PBL_ROUND)
+    GRect row_frame = GRect(
+        prv_round_right_edge(bounds, row_y, DIGIT_H) - EDGE_MARGIN - ROW_W,
+        row_y, ROW_W, DIGIT_H);
+#else
+    GRect row_frame = GRect(bounds.size.w - EDGE_MARGIN - ROW_W,
+                            row_y, ROW_W, DIGIT_H);
+#endif
+    *row_layers[i] = layer_create(row_frame);
+    layer_set_update_proc(*row_layers[i], row_procs[i]);
+    layer_add_child(window_layer, *row_layers[i]);
+    row_y += DIGIT_H + MODULE_GAP;
+  }
   health_service_events_subscribe(prv_health_handler, NULL);
   s_steps = (int)health_service_sum_today(HealthMetricStepCount);
+  s_distance_m = (int)health_service_sum_today(HealthMetricWalkedDistanceMeters);
+  s_kcal = (int)health_service_sum_today(HealthMetricActiveKCalories);
 #endif
 
   prv_update_time();
@@ -387,7 +494,15 @@ static void prv_window_unload(Window *window) {
 #if defined(PBL_HEALTH)
   health_service_events_unsubscribe();
   layer_destroy(s_steps_layer);
+  layer_destroy(s_dist_layer);
+  layer_destroy(s_cal_layer);
 #endif
+  connection_service_unsubscribe();
+  layer_destroy(s_bt_layer);
+  for (int i = 0; i < ICON_COUNT; i++) {
+    gbitmap_destroy(s_icon_bitmaps[i]);
+  }
+  gbitmap_destroy(s_icons_sheet);
   layer_destroy(s_day_layer);
   layer_destroy(s_date_layer);
   for (int d = 0; d < 10; d++) {

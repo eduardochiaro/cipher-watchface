@@ -55,6 +55,11 @@
           "type": "bitmap",
           "name": "IMAGE_LETTERS",
           "file": "letters.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_ICONS",
+          "file": "icons.png"
         }
       ]
     }
