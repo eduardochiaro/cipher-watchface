@@ -8,7 +8,9 @@ var moduleOptions = [
   { label: 'Weather', value: '5' },
   { label: 'Steps', value: '6' },
   { label: 'Distance', value: '7' },
-  { label: 'Calories', value: '8' }
+  { label: 'Calories', value: '8' },
+  { label: 'Year', value: '9' },
+  { label: 'Heart Rate', value: '10' }
 ];
 
 function sideSection(title, key, defaults) {
@@ -40,8 +42,17 @@ module.exports = [
         defaultValue: 'anaglyph',
         options: [
           { label: 'Anaglyph', value: 'anaglyph' },
-          { label: 'White', value: 'white' }
+          { label: 'Anaglyph (Flat)', value: 'anaglyph_flat' },
+          { label: 'Colorful', value: 'colorful' },
+          { label: 'Flat', value: 'white' }
         ],
+        capabilities: ['COLOR']
+      },
+      {
+        type: 'color',
+        messageKey: 'FLAT_COLOR',
+        label: 'Flat Color',
+        defaultValue: 'FFFFFF',
         capabilities: ['COLOR']
       },
       {

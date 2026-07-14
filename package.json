@@ -32,6 +32,7 @@
     },
     "messageKeys": [
       "TIME_COLOR",
+      "FLAT_COLOR",
       "FLICK_ANIMATION",
       "WEATHER_TEMPERATURE",
       "WEATHER_CODE",
@@ -41,6 +42,12 @@
     ],
     "resources": {
       "media": [
+        {
+          "file": "menu_icon.png",
+          "name": "MENU_ICON",
+          "type": "png",
+          "menuIcon": true
+        },
         {
           "type": "bitmap",
           "name": "IMAGE_BACKGROUND",

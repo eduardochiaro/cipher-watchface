@@ -1,4 +1,5 @@
 #include <pebble.h>
+#include <ctype.h>
 
 #define TIME_HEIGHT 44
 
@@ -37,7 +38,7 @@ enum {
 // user-assignable row modules; ids match config.js option values
 enum {
   MOD_NONE, MOD_DAY, MOD_DATE, MOD_BATTERY, MOD_BT, MOD_WEATHER,
-  MOD_STEPS, MOD_DIST, MOD_CAL,
+  MOD_STEPS, MOD_DIST, MOD_CAL, MOD_YEAR, MOD_HR,
   MOD_TYPE_COUNT
 };
 #define SLOTS_PER_SIDE 5
@@ -48,8 +49,15 @@ enum {
 #define PERSIST_FLICK_ANIM 2
 #define PERSIST_LEFT_MODS 3
 #define PERSIST_RIGHT_MODS 4
+#define PERSIST_FLAT_COLOR 5
 
-static bool s_anaglyph = true;
+// 0/1 keep old persisted bool meaning (flat/anaglyph);
+// TIME_FLAT's wire value stays "white" for config compat
+enum {
+  TIME_FLAT = 0, TIME_ANAGLYPH = 1, TIME_COLORFUL = 2, TIME_ANAGLYPH_FLAT = 3
+};
+static uint8_t s_time_color = TIME_ANAGLYPH;
+static GColor s_flat_color;  // init to white in prv_init
 static bool s_flick_anim = true;
 static uint8_t s_left_mods[SLOTS_PER_SIDE] = {
   MOD_DAY, MOD_DATE, MOD_BT, MOD_WEATHER, MOD_NONE
@@ -81,6 +89,7 @@ static int s_weather_code;
 static int s_steps;
 static int s_distance_m;
 static int s_kcal;
+static int s_hrm;  // stays 0 on watches without a heart-rate monitor
 #endif
 static GFont s_time_font;
 static char s_time_buffer[8];
@@ -97,16 +106,8 @@ static void prv_update_time(void) {
   strftime(day, sizeof(day), "%A", tick_time);
   strftime(mon, sizeof(mon), "%b", tick_time);
   snprintf(date, sizeof(date), "%s %d", mon, tick_time->tm_mday);
-  for (char *p = day; *p; p++) {
-    if (*p >= 'a' && *p <= 'z') {
-      *p -= 'a' - 'A';
-    }
-  }
-  for (char *p = date; *p; p++) {
-    if (*p >= 'a' && *p <= 'z') {
-      *p -= 'a' - 'A';
-    }
-  }
+  for (char *p = day; *p; p++) *p = toupper((unsigned char)*p);
+  for (char *p = date; *p; p++) *p = toupper((unsigned char)*p);
   bool changed = false;
   if (strcmp(day, s_day_buffer) != 0) {
     strncpy(s_day_buffer, day, sizeof(s_day_buffer));
@@ -150,7 +151,7 @@ static void prv_gradient_remap(GContext *ctx, Layer *layer) {
       if (row.data[x] != GColorImperialPurpleARGB8) {
         continue;
       }
-      // yellow/chrome boundary bows down mid-screen (parabola, 0 at edges)
+      // yellow/chrome boundary bows down mid-screen (parabola, 0 at edges) 
       int bulge = amp * 4 * x * (w - 1 - x) / ((w - 1) * (w - 1));
       uint8_t c;
       if (y < h / 3 + bulge) {
@@ -170,25 +171,30 @@ static void prv_gradient_remap(GContext *ctx, Layer *layer) {
 static void prv_time_update_proc(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
   // two shadow passes, offset opposite ways, then main pass on top
-  GColor up = PBL_IF_COLOR_ELSE(s_anaglyph ? GColorVividCerulean : GColorBlack,
-                                GColorBlack);
-  GColor down = PBL_IF_COLOR_ELSE(s_anaglyph ? GColorFolly : GColorBlack,
-                                  GColorBlack);
-  int offset = s_anaglyph? SHADOW_OFFSET : SHADOW_OFFSET-1;
-  prv_draw_time(ctx, bounds, -offset, -offset, up);
-  prv_draw_time(ctx, bounds, offset, offset, down);
+  bool shadows = s_time_color == TIME_ANAGLYPH ||
+                 s_time_color == TIME_ANAGLYPH_FLAT;
+  if (shadows) {
+    prv_draw_time(ctx, bounds, -SHADOW_OFFSET, -SHADOW_OFFSET,
+                  PBL_IF_COLOR_ELSE(GColorVividCerulean, GColorBlack));
+    prv_draw_time(ctx, bounds, SHADOW_OFFSET, SHADOW_OFFSET,
+                  PBL_IF_COLOR_ELSE(GColorFolly, GColorBlack));
+  }
+  //black border
   prv_draw_time(ctx, bounds, -1, -1, GColorBlack);
   prv_draw_time(ctx, bounds, -1, 1, GColorBlack);
   prv_draw_time(ctx, bounds, 1, -1, GColorBlack);
   prv_draw_time(ctx, bounds, 1, 1, GColorBlack);
 #if defined(PBL_COLOR)
-  if (s_anaglyph) {
+  if (s_time_color != TIME_FLAT) {
     prv_draw_time(ctx, bounds, 0, 0, GColorImperialPurple);
-    prv_gradient_remap(ctx, layer);
+    if (s_time_color != TIME_ANAGLYPH_FLAT) {
+      prv_gradient_remap(ctx, layer);
+    }
     return;
   }
 #endif
-  prv_draw_time(ctx, bounds, 0, 0, GColorWhite);
+  prv_draw_time(ctx, bounds, 0, 0,
+                PBL_IF_COLOR_ELSE(s_flat_color, GColorWhite));
 }
 
 static void prv_tick_handler(struct tm *tick_time, TimeUnits units_changed) {
@@ -358,7 +364,7 @@ static void prv_draw_dist(GContext *ctx, int y, int lx, int rx, bool right) {
 // a module the watch can't show (health on aplite) collapses like MOD_NONE
 static bool prv_module_available(int mod) {
 #if !defined(PBL_HEALTH)
-  if (mod == MOD_STEPS || mod == MOD_DIST || mod == MOD_CAL) {
+  if (mod == MOD_STEPS || mod == MOD_DIST || mod == MOD_CAL || mod == MOD_HR) {
     return false;
   }
 #endif
@@ -393,6 +399,11 @@ static void prv_draw_module(GContext *ctx, GRect bounds, int mod, int y,
     case MOD_WEATHER:
       prv_draw_weather(ctx, y, lx, rx, right);
       return;
+    case MOD_YEAR: {
+      time_t now = time(NULL);
+      snprintf(buf, sizeof(buf), "%d", localtime(&now)->tm_year + 1900);
+      break;
+    }
 #if defined(PBL_HEALTH)
     case MOD_STEPS:
       icon = ICON_SHOE;
@@ -404,6 +415,13 @@ static void prv_draw_module(GContext *ctx, GRect bounds, int mod, int y,
     case MOD_CAL:
       icon = ICON_FLAME;
       snprintf(buf, sizeof(buf), "%d", s_kcal);
+      break;
+    case MOD_HR:
+      if (!s_hrm) {
+        return;  // no reading yet / no HRM: row stays reserved like weather
+      }
+      icon = ICON_HEART;
+      snprintf(buf, sizeof(buf), "%d", s_hrm);
       break;
 #endif
     default:
@@ -456,6 +474,10 @@ static void prv_health_handler(HealthEventType event, void *context) {
     s_kcal = (int)health_service_sum_today(HealthMetricActiveKCalories);
     layer_mark_dirty(s_rows_layer);
   }
+  if (event == HealthEventHeartRateUpdate || event == HealthEventSignificantUpdate) {
+    s_hrm = (int)health_service_peek_current_value(HealthMetricHeartRateBPM);
+    layer_mark_dirty(s_rows_layer);
+  }
 }
 #endif
 
@@ -503,8 +525,25 @@ static void prv_tap_handler(AccelAxisType axis, int32_t direction) {
 static void prv_inbox_received(DictionaryIterator *iter, void *context) {
   Tuple *t = dict_find(iter, MESSAGE_KEY_TIME_COLOR);
   if (t) {
-    s_anaglyph = strcmp(t->value->cstring, "anaglyph") == 0;
-    persist_write_bool(PERSIST_ANAGLYPH, s_anaglyph);
+    const char *v = t->value->cstring;
+    if (strcmp(v, "anaglyph") == 0) {
+      s_time_color = TIME_ANAGLYPH;
+    } else if (strcmp(v, "colorful") == 0) {
+      s_time_color = TIME_COLORFUL;
+    } else if (strcmp(v, "anaglyph_flat") == 0) {
+      s_time_color = TIME_ANAGLYPH_FLAT;
+    } else {
+      s_time_color = TIME_FLAT;
+    }
+    persist_write_int(PERSIST_ANAGLYPH, s_time_color);
+    if (s_time_canvas) {
+      layer_mark_dirty(s_time_canvas);
+    }
+  }
+  t = dict_find(iter, MESSAGE_KEY_FLAT_COLOR);
+  if (t) {
+    s_flat_color = GColorFromHEX(t->value->int32);
+    persist_write_int(PERSIST_FLAT_COLOR, s_flat_color.argb);
     if (s_time_canvas) {
       layer_mark_dirty(s_time_canvas);
     }
@@ -519,12 +558,12 @@ static void prv_inbox_received(DictionaryIterator *iter, void *context) {
   for (int i = 0; i < SLOTS_PER_SIDE; i++) {
     t = dict_find(iter, MESSAGE_KEY_LEFT_MODULE + i);
     if (t) {
-      s_left_mods[i] = t->value->cstring[0] - '0';
+      s_left_mods[i] = atoi(t->value->cstring);
       mods_changed = true;
     }
     t = dict_find(iter, MESSAGE_KEY_RIGHT_MODULE + i);
     if (t) {
-      s_right_mods[i] = t->value->cstring[0] - '0';
+      s_right_mods[i] = atoi(t->value->cstring);
       mods_changed = true;
     }
   }
@@ -559,12 +598,13 @@ static void prv_window_load(Window *window) {
   layer_add_child(window_layer, bitmap_layer_get_layer(s_background_layer));
 
   // 200px-wide screens (emery, gabbro) get the biggest LECO
-  bool big_screen = bounds.size.w >= 200;
+#if PBL_PLATFORM_EMERY || PBL_PLATFORM_GABBRO
+  s_time_font = fonts_get_system_font(FONT_KEY_LECO_60_NUMBERS_AM_PM);
+  int time_height = 68;
+#else
   s_time_font = fonts_get_system_font(FONT_KEY_LECO_38_BOLD_NUMBERS);
-  #if PBL_PLATFORM_EMERY || PBL_PLATFORM_GABBRO
-    s_time_font = fonts_get_system_font(FONT_KEY_LECO_60_NUMBERS_AM_PM);
-  #endif
-  int time_height = big_screen ? 68 : TIME_HEIGHT;
+  int time_height = TIME_HEIGHT;
+#endif
   int bottom_margin = PBL_IF_ROUND_ELSE(24, 4);
   GRect time_frame = GRect(0, bounds.size.h - time_height - bottom_margin,
                            bounds.size.w, time_height);
@@ -608,6 +648,7 @@ static void prv_window_load(Window *window) {
   s_steps = (int)health_service_sum_today(HealthMetricStepCount);
   s_distance_m = (int)health_service_sum_today(HealthMetricWalkedDistanceMeters);
   s_kcal = (int)health_service_sum_today(HealthMetricActiveKCalories);
+  s_hrm = (int)health_service_peek_current_value(HealthMetricHeartRateBPM);
 #endif
 
   prv_update_time();
@@ -642,7 +683,11 @@ static void prv_window_unload(Window *window) {
 
 static void prv_init(void) {
   if (persist_exists(PERSIST_ANAGLYPH)) {
-    s_anaglyph = persist_read_bool(PERSIST_ANAGLYPH);
+    s_time_color = persist_read_int(PERSIST_ANAGLYPH);
+  }
+  s_flat_color = GColorWhite;
+  if (persist_exists(PERSIST_FLAT_COLOR)) {
+    s_flat_color.argb = persist_read_int(PERSIST_FLAT_COLOR);
   }
   if (persist_exists(PERSIST_FLICK_ANIM)) {
     s_flick_anim = persist_read_bool(PERSIST_FLICK_ANIM);
