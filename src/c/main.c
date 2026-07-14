@@ -43,6 +43,7 @@ enum {
 };
 #define SLOTS_PER_SIDE 5
 // rows start below the top edge; round leaves room for the bezel
+// gabbro centers each side's column on the screen instead (see rows proc)
 #define ROWS_TOP PBL_IF_ROUND_ELSE(20, EDGE_MARGIN)
 
 #define PERSIST_ANAGLYPH 1
@@ -449,6 +450,19 @@ static void prv_rows_update_proc(Layer *layer, GContext *ctx) {
   for (int side = 0; side < 2; side++) {
     const uint8_t *mods = side ? s_right_mods : s_left_mods;
     int y = ROWS_TOP;
+#if PBL_PLATFORM_GABBRO
+    // taller screen: center this side's visible rows on the screen middle
+    int visible = 0;
+    for (int i = 0; i < SLOTS_PER_SIDE; i++) {
+      if (prv_module_available(mods[i])) {
+        visible++;
+      }
+    }
+    if (visible > 0) {
+      int total_h = visible * DIGIT_H + (visible - 1) * MODULE_GAP;
+      y = (bounds.size.h - total_h) / 2.5;
+    }
+#endif
     for (int i = 0; i < SLOTS_PER_SIDE; i++) {
       if (!prv_module_available(mods[i])) {
         continue;  // unset lines collapse: no gap left behind
