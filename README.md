@@ -34,8 +34,8 @@ A-X-O-L-O-T-L! My time has come to burn! I invoke the ancient power that I may r
 ![Gabbro 4](assets/gabbro_4.png)
 
 ## Store
-[Rebble App Store](https://apps.rebble.io/en_US/application/)
-[Pebble App Store](https://apps.repebble.com/)
+[Rebble App Store](https://apps.rebble.io/en_US/application/6a5609cec5fa78000971594e)
+[Pebble App Store](https://apps.repebble.com/6a5609cec5fa78000971594e)
 
 ## Configuration Options
 
