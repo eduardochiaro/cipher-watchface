@@ -26,10 +26,11 @@
   #define SHADOW_OFFSET 2
 #endif
 
-// icons.png: 10 square cells, left to right
+// icons.png: 13 square cells, left to right
 enum {
   ICON_BT_ON, ICON_BT_OFF, ICON_FLAME, ICON_SHOE, ICON_HEART,
   ICON_SUN, ICON_CLOUD, ICON_RAIN, ICON_SNOW, ICON_STORM,
+  ICON_KM, ICON_M, ICON_MI,
   ICON_COUNT
 };
 // space advance = 60% of a glyph cell, rounded
@@ -270,6 +271,8 @@ static GBitmap *prv_glyph_for(char c) {
   return NULL;  // space: advance only
 }
 
+#define DOT_SZ (DIGIT_GAP + 1)
+
 static void prv_draw_glyphs(GContext *ctx, const char *str, int x, int y) {
   graphics_context_set_compositing_mode(ctx, GCompOpSet);
   for (; *str; str++) {
@@ -277,6 +280,12 @@ static void prv_draw_glyphs(GContext *ctx, const char *str, int x, int y) {
     if (g) {
       graphics_draw_bitmap_in_rect(ctx, g, GRect(x, y, DIGIT_W, DIGIT_H));
       x += DIGIT_W + DIGIT_GAP;
+    } else if (*str == '.') {
+      // sprites have no '.': baseline dot to match the black glyphs
+      graphics_context_set_fill_color(ctx, GColorBlack);
+      graphics_fill_rect(ctx, GRect(x, y + DIGIT_H - DOT_SZ, DOT_SZ, DOT_SZ),
+                         0, GCornerNone);
+      x += DOT_SZ + DIGIT_GAP;
     } else {
       x += SPACE_ADV;
     }
@@ -286,7 +295,13 @@ static void prv_draw_glyphs(GContext *ctx, const char *str, int x, int y) {
 static int prv_glyphs_width(const char *str) {
   int w = 0;
   for (; *str; str++) {
-    w += prv_glyph_for(*str) ? DIGIT_W + DIGIT_GAP : SPACE_ADV;
+    if (prv_glyph_for(*str)) {
+      w += DIGIT_W + DIGIT_GAP;
+    } else if (*str == '.') {
+      w += DOT_SZ + DIGIT_GAP;
+    } else {
+      w += SPACE_ADV;
+    }
   }
   return w - DIGIT_GAP;  // drop trailing gap
 }
@@ -338,30 +353,6 @@ static void prv_draw_weather(GContext *ctx, int y, int lx, int rx, bool right) {
                      0, GCornerNone);
 }
 
-#if defined(PBL_HEALTH)
-// number and unit drawn separately: tighter gap than a full SPACE_ADV
-static void prv_draw_dist(GContext *ctx, int y, int lx, int rx, bool right) {
-  char num[8];
-  const char *unit;
-  if (health_service_get_measurement_system_for_display(
-          HealthMetricWalkedDistanceMeters) == MeasurementSystemImperial) {
-    snprintf(num, sizeof(num), "%d", s_distance_m * 1000 / 1609344);
-    unit = "MI";
-  } else if (s_distance_m >= 1000) {
-    snprintf(num, sizeof(num), "%d", s_distance_m / 1000);
-    unit = "KM";
-  } else {
-    snprintf(num, sizeof(num), "%d", s_distance_m);
-    unit = "M";
-  }
-  int num_w = prv_glyphs_width(num);
-  int w = num_w + DIGIT_GAP + 1 + prv_glyphs_width(unit);
-  int x = right ? rx - w : lx;
-  prv_draw_glyphs(ctx, num, x, y);
-  prv_draw_glyphs(ctx, unit, x + num_w + DIGIT_GAP + 1, y);
-}
-#endif
-
 // a module the watch can't show (health on aplite) collapses like MOD_NONE
 static bool prv_module_available(int mod) {
 #if !defined(PBL_HEALTH)
@@ -411,8 +402,21 @@ static void prv_draw_module(GContext *ctx, GRect bounds, int mod, int y,
       snprintf(buf, sizeof(buf), "%d", s_steps);
       break;
     case MOD_DIST:
-      prv_draw_dist(ctx, y, lx, rx, right);
-      return;
+      if (health_service_get_measurement_system_for_display(
+              HealthMetricWalkedDistanceMeters) == MeasurementSystemImperial) {
+        // tenths of a mile; overflows past 214 km, far beyond a day's walk
+        int t = s_distance_m * 10000 / 1609344;
+        icon = ICON_MI;
+        snprintf(buf, sizeof(buf), "%d.%d", t / 10, t % 10);
+      } else if (s_distance_m >= 1000) {
+        icon = ICON_KM;
+        snprintf(buf, sizeof(buf), "%d.%d", s_distance_m / 1000,
+                 (s_distance_m % 1000) / 100);
+      } else {
+        icon = ICON_M;
+        snprintf(buf, sizeof(buf), "%d", s_distance_m);
+      }
+      break;
     case MOD_CAL:
       icon = ICON_FLAME;
       snprintf(buf, sizeof(buf), "%d", s_kcal);
