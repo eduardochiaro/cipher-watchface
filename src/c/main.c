@@ -339,8 +339,8 @@ static void prv_draw_weather(GContext *ctx, int y, int lx, int rx, bool right) {
     x = lx + ICON_SZ + DIGIT_GAP;
   }
   if (neg) {
-    // glyph sheets have no '-': draw a dash to match the white sprites
-    graphics_context_set_fill_color(ctx, GColorWhite);
+    // glyph sheets have no '-': draw a dash to match the black sprites
+    graphics_context_set_fill_color(ctx, GColorBlack);
     graphics_fill_rect(ctx, GRect(x, y + DIGIT_H / 2 - 1, DIGIT_W - 1, 2),
                        0, GCornerNone);
     x += DIGIT_W + DIGIT_GAP;
